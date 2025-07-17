@@ -97,7 +97,7 @@ class GainSurfaceProcessingAlgorithm(QgsProcessingAlgorithm):
 
         filePath = self.project.homePath()
         gainSurfacePath = os.path.join(filePath, '04_Gain_Surface', 'Yield_Gain.tiff')
-        expression = f'"{minuendRaster.name()}@1" - "{subtrahendRaster.name()}@1"'
+        expression = f'"{subtrahendRaster.name()}@1" - "{minuendRaster.name()}@1"'
         parameter = self.getRasterCalculatorParameters(expression, minuendRaster, gainSurfacePath)
 
         gainSurface = self.algRunner.runRasterCalculator(parameter, context=context, feedback=feedback)
