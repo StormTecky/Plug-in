@@ -135,11 +135,26 @@ library(ggspatial)
  if (!file.exists(YieldDataPath)) stop("❌ Shapefile 'filtered_points.shp'  not found : ", YieldDataPath)
  if (!file.exists(KrigedDataPath)) stop("❌ Shapefile 'treatment_T1_T2.shp' not found : ", KrigedDataPath)
 
-
  ## Coordinate reference system
- PROJ_donnees_initial=CRS("+init=epsg:32630")
- PROJ_Mercator=CRS("+init=epsg:3857")
- CRS_field=32630
+ proj_field <- proj4string(Field_contour)
+ proj_yield <- proj4string(Yield_data)
+ proj_kriged <- proj4string(Kriged_data)
+ cat("📌 PROJ field contour:", proj_field, "\n")
+ cat("📌 PROJ yield data   :", proj_yield, "\n")
+ cat("📌 PROJ kriged data  :", proj_kriged, "\n")
+ PROJ_Mercator <- CRS("+init=epsg:3857")
+ if (!identical(proj_field, PROJ_Mercator@projargs))
+  Field_contour_mercator <- spTransform(Field_contour, PROJ_Mercator)
+ else
+  Field_contour_mercator <- Field_contour
+ if (!identical(proj_yield, PROJ_Mercator@projargs))
+  Yield_data_mercator <- spTransform(Yield_data, PROJ_Mercator)
+ else
+  Yield_data_mercator <- Yield_data
+ if (!identical(proj_kriged, PROJ_Mercator@projargs))
+  Kriged_data_mercator <- spTransform(Kriged_data, PROJ_Mercator)
+ else
+  Kriged_data_mercator <- Kriged_data
 
  ## INITIALISATION OF CLASSES
 
