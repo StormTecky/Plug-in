@@ -1,0 +1,524 @@
+---
+title: "Geostatistics trial report"
+#author: "LPC_Geostat_Team"
+params:
+  CodeTrial: "1"
+  CodeCountry: "France"
+  CodeDir: "E:/QGIS/"
+output:
+  html_document:
+    toc: no
+    toc_depth: '2'
+  pdf_document:
+    toc: no
+    toc_depth: '2'
+  word_document:
+    toc: no
+    toc_depth: '2'
+header-includes:
+  - \usepackage{titling}
+  - \pretitle{\begin{center}}}
+  - \postitle{\end{center}}
+  - \includegraphics{width=1.5in, height=1in]{E:/QGIS/logos/Logo_LPC.jpg){width=1.5in}\LARGE\\}
+---
+
+```{r ROOT Directory, include=FALSE}
+ParamRoot <- file.path(params@CodeDir, "QGIS_DATA", paste0("Data_report_LPC_", params@CodeTrial))
+ParamLogo <- file.path(params@CodeDir, "logos", "Logo_LPC.jpg")
+ParamSGBD <- file.path(params@CodeDir, "SGBD", "BD_GEOSTAT_LPC.sqlite")
+if (!file.exists(ParamSGBD)) stop("❌ Database :", ParamSGBD, "not found")
+if (!file.exists(ParamLogo)) warning("⚠️ Logo :", ParamLogo, "not found")
+if (!file.exists(ParamRoot)) warning("⚠️ Folder :", ParamRoot, "not found")
+knitr::opts_knit$set(echo = TRUE,
+                      root.dir=ParamRoot)
+```
+
+
+## date: `r format(Sys.time(), '%d/%m/%y')`
+![logotest](E:/QGIS/logos/Logo_LPC.jpg){width=1.5in}
+
+```{r Text and SQLite, include=FALSE, ECHO=FALSE}
+library(DBI)
+library(RSQLite)
+library (dbplyr)
+
+gstat <- RSQLite::dbConnect(
+  RSQLite::SQLite(),
+  host="rsn",
+##RSQLite::SQLITE_RWC(),
+  ParamSGBD)
+```
+
+
+```{r SQLite Datas, include=FALSE, ECHO=TRUE}
+
+#FARMER NAME
+
+farmer <- RSQLite::dbSendQuery(gstat,build_sql("SELECT FARMER.FarmerFirstName, FARMER.FarmerLastName
+                     FROM FARMER, TrialGeostat
+                     WHERE IDTrial =",params$CodeTrial,"  AND TrialGeostat.IDFarmer = FARMER.IDFarmer ", con = gstat)
+                     )
+
+
+farmer1 <- RSQLite::dbFetch(farmer,n = 1)
+
+#LOCATION
+
+locat <- RSQLite::dbSendQuery(gstat,
+                     build_sql("SELECT FARMER.Town, FARMER.ZIPCODE
+                     FROM FARMER, TrialGeostat
+                     WHERE IDTrial = ",params$CodeTrial," AND TrialGeostat.IDFarmer = FARMER.IDFarmer ", con = gstat)
+)
+
+locat1 <- RSQLite::dbFetch(locat,n = 1)
+
+
+#FIELD NAME SOIL IRRI AREA
+
+field <- RSQLite::dbSendQuery(gstat,
+                     build_sql("SELECT FielName, FieldSoil, FieldIrri, FieldAreaHa, T1, T2 FROM TrialGeostat
+                     WHERE IDTrial = ",params$CodeTrial, con = gstat))
+
+field1 <- RSQLite::dbFetch(field,n = 1)
+
+#Trial treatment T1 T1
+ParamT1 <- paste0("T1 ",field1$T1)
+ParamT2 <- paste0("T2 ",field1$T2)
+
+#CROP VARIETY ETC
+
+crop <- RSQLite::dbSendQuery(gstat,
+                     build_sql("SELECT CropTrial.CropName, CropTrial.Variety, CropTrial.SowingDate, CropTrial.HarvestDate, CropTrial.InterRoCM
+                     FROM CropTrial, TrialGeostat
+                     WHERE TrialGeoStat.IDTrial = ",params$CodeTrial," AND TrialGeostat.IDTrial = CropTrial.IDTrial ORDER BY CropTrial.HarvestDate DESC", con = gstat))
+
+crop1 <- RSQLite::dbFetch(crop,n = 1)
+
+#PREVIOUS CROP VARIETY ETC
+
+pcrop <- RSQLite::dbSendQuery(gstat,
+                     build_sql("SELECT CropTrial.CropName, CropTrial.Variety, CropTrial.SowingDate, CropTrial.HarvestDate, CropTrial.InterRoCM
+                     FROM CropTrial, TrialGeostat
+                     WHERE TrialGeoStat.IDTrial = ",params$CodeTrial," AND TrialGeostat.IDTrial = CropTrial.IDTrial ORDER BY CropTrial.HarvestDate ASC", con = gstat))
+
+pcrop1 <- RSQLite::dbFetch(pcrop,n = 1)
+
+```
+
+
+```{r Disconect, include=FALSE, ECHO=FALSE}
+RSQLite::dbDisconnect(gstat)
+```
+
+```{r Library and Map Data, echo=FALSE, include=FALSE}
+library(leaflet)
+library(maptools)
+library(RColorBrewer)
+library(mapview)
+library(sp)
+library(raster)
+library(ggplot2)
+library(sf)
+library(rgeos)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(basemaps)
+library(cowplot)
+library(ggspatial)
+
+  ## LOADING DATASETS
+ Field_contour=file.path(ParamRoot, "field_contour.shp")
+ Yield_data=file.path(ParamRoot, "filtered_points.shp")
+ Yield_data_df=data.frame(Yield_data) ## Convert to dataframe for ggplot
+ Kriged_data=file.path(ParamRoot, "treatment_T1_T2.shp")
+ if (!file.exists(FieldContourPath)) stop("❌ Shapefile 'field_contour.shp' not found : ", FieldContourPath)
+ if (!file.exists(YieldDataPath)) stop("❌ Shapefile 'filtered_points.shp'  not found : ", YieldDataPath)
+ if (!file.exists(KrigedDataPath)) stop("❌ Shapefile 'treatment_T1_T2.shp' not found : ", KrigedDataPath)
+
+
+ ## Coordinate reference system
+ PROJ_donnees_initial=CRS("+init=epsg:32630")
+ PROJ_Mercator=CRS("+init=epsg:3857")
+ CRS_field=32630
+
+ ## INITIALISATION OF CLASSES
+
+    ## Create classes for yield data
+      Class_1=7 # Class 1 : "< 7 tonnes"
+      Class_2=8 # Class 2 : "7-8 tonnes"
+      Class_3=9 # Class 3 : "8-9 tonnes"
+                # Class 4 : ">9 tonnes"  No need to define Class_4 because it will take everything above Class_3
+      Labels_map=c("< 7 tonnes","7-8 tonnes","8-9 tonnes",">9 tonnes") ## There are #N+1 number of classes
+      Couleurs_rendement=c("#D2D2D2","#FFFF00","#55FF00","#267300")
+
+      ## Create class for gain and difference data between treatments
+      Class_1_diff=0 # Class 1 : "< 0 tonnes"
+      Class_2_diff=0.5 # Class 2 : "0-0.5 tonnes"
+      Class_3_diff=1 # Class 3 : "0.5-1 tonnes"
+                                         # No need to define Class_4 because it will take everything above Class_3
+      Labels_map_diff=c("< 0 tonnes","0-0.5 tonnes","0.5-1 tonnes",">1 tonnes") ## There are #N+1 number of classes
+
+```
+
+
+```{r Global Image, echo=FALSE, include=FALSE,warning=FALSE,message=FALSE}
+
+
+## FIRST PLOT
+
+worldmap <- ne_countries(scale = 'medium', type = 'map_units',
+                         returnclass = 'sf')
+ReportCointry <- worldmap[worldmap$name == params$CodeCountry,]
+
+proj4string(Field_contour)= PROJ_donnees_initial
+Field_contour_Mercator=spTransform(Field_contour, PROJ_Mercator)
+
+# Zooming on the centroid of the field
+zoom_to <- c(coordinates(gCentroid(Field_contour))[1],coordinates(gCentroid(Field_contour))[2])
+
+Global_map=ggplot() + geom_sf(data = ReportCointry) +
+              geom_sf(data = st_sfc(st_point(zoom_to), crs = CRS_field),
+                      color = 'red',size=5)+ theme_bw()
+
+
+## SECOND PLOT OF FIELD
+
+
+set_defaults(map_service = "esri", map_type = "world_imagery")
+
+# Preparation to plot Field_contour_Mercator for ggplot2
+Field_contour_Mercator@data$id <- rownames(Field_contour_Mercator@data)
+Field_contour_Mercatordata <- fortify(Field_contour_Mercator, region = "id")
+Field_contour_Mercatordf <- merge(Field_contour_Mercatordata, Field_contour_Mercator@data,by = "id")
+
+
+Field_plot=ggplot() +
+              basemap_gglayer(Field_contour_Mercator) +
+              geom_polygon(data = Field_contour_Mercatordf, aes(x = long, y = lat),fill="red")+
+              scale_fill_identity() +
+              annotation_scale(text_col="white",pad_x = unit(0.5, "cm"),pad_y = unit(0.5, "cm"))+
+              xlab("")+ylab("")+
+              theme_bw()+
+              theme(
+                    axis.text.x = element_blank(),
+                    axis.text.y = element_blank()
+                  )+
+              coord_sf()
+
+```
+
+
+```{r Trial Mapping, fig.asp=0.62,echo=FALSE,warning=FALSE,message=FALSE}
+
+#Field_mapping
+
+plot_grid(Global_map, Field_plot, ncol = 2, nrow = 1)
+
+```
+
+# Trial description
+|**Farmer**|**Location**|**Field name**|**Area size**|**Type of soil**|
+|:--------:|:---------:|:--------------:|:---------:|:---------:|
+|`r farmer1`|`r locat1`|`r field1$FielName`|`r field1$FieldAreaHa`|`r field1$FieldSoil`|
+
+# Crop description
+|**Crop**| **Variety**|**Sowing date**|**Harvesting date**|**Irrigated area**|
+|:--------:|:---------:|:--------------:|:---------:|:---------:|
+|`r crop1$CropName`|`r crop1$Variety`|`r crop1$SowingDate`|`r crop1$HarvestDate`|`r field1$FieldIrri`|
+**Spacing between rows**: `r crop1$InterRoCM``
+**Previously crop**: `r pcrop1$CropName`
+**Sowing date**: `r pcrop1$SowingDate` **Harvesting date**: `r pcrop1$HarvestDate`
+
+\newpage
+
+## Experimental design:This trial is set up in order to evaluate `r field1$T2` compared to `r field1$T1`. The strip geostatic design is analysed using `r nrow(Yield_data_df)` yield points, strips from `r field1$T1` and strips from `r field1$T2`are 36m width, the length was according to the area length.
+
+
+
+```{r Yield Map, echo=FALSE, include=FALSE}
+
+library(ggplot2)
+
+## Classifying yield data
+
+  Classif=c(min(Yield_data_df$VRYIELD),Class_1,Class_2,Class_3,max(Yield_data_df$VRYIELD)) # Just need to
+  Yield_data_df$Class=as.factor(cut(Yield_data_df$VRYIELD,breaks=Classif,labels=FALSE,include.lowest = TRUE))
+
+## Create Plots
+
+  # Full Plot
+
+  Full_yield_plot=ggplot(Yield_data_df,aes(coords.x1,coords.x2,color=Class))+geom_point(size=0.8)+
+                  coord_equal() +
+                  theme_bw()+
+                  xlab("Longitude")+ylab("Latitude")+ggtitle("Points with measured yield values")+
+                  scale_color_manual("Yield (Tons)",
+                                    values=Couleurs_rendement,
+                                    breaks=c("1","2","3","4"),
+                                    labels=Labels_map)+
+                  theme(
+                    axis.title.x = element_text(size=8),
+                    axis.title.y = element_text(size=8),
+                    axis.text.x = element_text(size=4),
+                    axis.text.y = element_text(size=4),
+                    legend.title = element_text(size = 8),
+                    legend.text = element_text(size = 6),
+                    #legend.position="bottom",
+                    legend.key.size = unit(10, "point")
+                  )
+
+  # Plot Treatment 1
+
+  Plot_Treatment1=ggplot(Yield_data_df[which(Yield_data_df$Tratmnt%in%"T1"),],aes(coords.x1,coords.x2,color=Class))+geom_point(size=0.8)+
+                  coord_equal() +
+                  theme_bw()+
+                  xlab("Longitude")+ylab("Latitude")+ggtitle(ParamT1)+
+                  scale_color_manual("Yield (Tons)",
+                                    values=Couleurs_rendement,
+                                    breaks=c("1","2","3","4"),
+                                    labels=Labels_map)+
+                  theme(
+                    axis.title.x = element_text(size=8),
+                    axis.title.y = element_text(size=8),
+                    axis.text.x = element_text(size=4),
+                    axis.text.y = element_text(size=4),
+                    legend.title = element_text(size = 8),
+                    legend.text = element_text(size = 6),
+                    legend.position = "none"
+                  )
+
+  # Plot Treatment 2
+
+  Plot_Treatment2=ggplot(Yield_data_df[which(Yield_data_df$Tratmnt%in%"T2"),],aes(coords.x1,coords.x2,color=Class))+geom_point(size=0.8)+
+                  coord_equal() +
+                  theme_bw()+
+                  xlab("Longitude")+ylab("Latitude")+ggtitle(ParamT2)+
+                  scale_color_manual("Yield (Tons)",
+                                    values=Couleurs_rendement,
+                                    breaks=c("1","2","3","4"),
+                                    labels=Labels_map)+
+                  theme(
+                    axis.title.x = element_text(size=8),
+                    axis.title.y = element_text(size=8),
+                    axis.text.x = element_text(size=4),
+                    axis.text.y = element_text(size=4),
+                    legend.title = element_text(size = 8),
+                    legend.text = element_text(size = 6),
+                    legend.position = "none"
+                  )
+
+
+```
+
+
+```{r Map Analyze, out.width = '150%', echo=FALSE}
+
+library(grid)
+grid.newpage()
+# Page i=organisation : nrow = 2, ncol = 2
+pushViewport(viewport(layout = grid.layout(2, 2)))
+# Une fonction pour definir une region dans la mise en page
+define_region <- function(row, col){
+  viewport(layout.pos.row = row, layout.pos.col = col)
+}
+# Arranger les graphiques
+print(Full_yield_plot, vp=define_region(1:2, 1))
+print(Plot_Treatment1, vp = define_region(1, 2))
+print(Plot_Treatment2, vp = define_region(2, 2))
+
+```
+
+\newpage
+## Statistical method
+After the cleaning and filtering step. The yield map and semivariogram were built for each treatment. The whole area presented `r nrow(Yield_data_df)` yield measurement points. Based on the data, a statistical test was developed from geostatistical simulations (Analysis of spatial discontinuities). For kriging, models were calibrated, and the model of 80% points coming from each treatment was used to simulate the yield in the total area. The other 20% of data (`r nrow( Yield_data_df)*0.2` points) was used to evaluate the modelisation and measure the estimation accuracy.
+
+```{r Map Stats, echo=FALSE, include=FALSE}
+library(ggplot2)
+library(maptools)
+
+
+## Classifying data with respect to manual classes
+Classif_1=c(min(Kriged_data$VRYIELD),Class_1,Class_2,Class_3,max(Kriged_data$VRYIELD))
+Kriged_data$Class_T1=as.factor(cut(Kriged_data$VRYIELD,breaks=Classif_1,labels=FALSE,include.lowest = TRUE))
+
+Classif_2=c(min(Kriged_data$VRYIELD_2),Class_1,Class_2,Class_3,max(Kriged_data$VRYIELD_2))
+Kriged_data$Class_T2=as.factor(cut(Kriged_data$VRYIELD_2,breaks=Classif_2,labels=FALSE,include.lowest = TRUE))
+
+Classif_3=c(min(Kriged_data$Diff.),Class_1_diff,Class_2_diff,Class_3_diff,max(Kriged_data$Diff.))
+Kriged_data$Class_Diff=as.factor(cut(Kriged_data$Diff.,breaks=Classif_3,labels=FALSE,include.lowest = TRUE))
+
+
+## Convert data frame to raster
+gridded(Kriged_data)=TRUE
+
+Raster_Yield_1=raster(Kriged_data,layer=4)
+Raster_Yield_2=raster(Kriged_data,layer=2)
+Raster_Yield_Diff=raster(Kriged_data,layer=3)
+
+
+## Create PLOTS
+
+  # Plot T1
+
+  Model_T1=ggplot(data.frame(Kriged_data),aes(coords.x1,coords.x2,fill=Class_T1))+geom_raster()+
+            coord_equal() +
+            theme_bw()+
+            xlab("Longitude")+ylab("Latitude")+ggtitle(ParamT1)+
+            scale_fill_manual("Yield (Tons)",
+                              values=Couleurs_rendement,
+                              breaks=c("1","2","3","4"),
+                              labels=Labels_map)+
+                  theme(
+                    axis.title.x = element_text(size=8),
+                    axis.title.y = element_text(size=8),
+                    axis.text.x = element_text(size=4),
+                    axis.text.y = element_text(size=4),
+                    legend.title = element_text(size = 8),
+                    legend.text = element_text(size = 6),
+                    legend.position = "none"
+                  )
+    # Plot T2
+
+  Model_T2=ggplot(data.frame(Kriged_data),aes(coords.x1,coords.x2,fill=Class_T2))+geom_raster()+
+            coord_equal() +
+            theme_bw()+
+            xlab("Longitude")+ylab("Latitude")+ggtitle(ParamT2)+
+            scale_fill_manual("Yield (Tons)",
+                              values=Couleurs_rendement,
+                              breaks=c("1","2","3","4"),
+                              labels=Labels_map)+
+                  theme(
+                    axis.title.x = element_text(size=8),
+                    axis.title.y = element_text(size=8),
+                    axis.text.x = element_text(size=4),
+                    axis.text.y = element_text(size=4),
+                    legend.title = element_text(size = 8),
+                    legend.text = element_text(size = 6),
+                    legend.position = "none"
+                  )
+
+    # Plot T3
+
+  Yield_gains=ggplot(data.frame(Kriged_data),aes(coords.x1,coords.x2,fill=Class_Diff))+geom_raster()+
+              coord_equal() +
+              theme_bw()+
+              xlab("Longitude")+ylab("Latitude")+ggtitle("Yield gain using T2")+
+              scale_fill_manual("Yield (Tons)",
+                                values=Couleurs_rendement,
+                                breaks=c("1","2","3","4"),
+                                labels=Labels_map_diff)+
+                  theme(
+                    axis.title.x = element_text(size=8),
+                    axis.title.y = element_text(size=8),
+                    axis.text.x = element_text(size=4),
+                    axis.text.y = element_text(size=4),
+                    legend.title = element_text(size = 8), 
+                    legend.text = element_text(size = 6),
+                  )
+```
+
+
+```{r Map differences, out.width = '150%', echo=FALSE}
+
+library(grid)
+grid.newpage()
+# Créer la mise en page : nrow = 2, ncol = 2
+pushViewport(viewport(layout = grid.layout(2, 2)))
+# Une fonction pour definir une region dans la mise en page
+define_region <- function(row, col){
+  viewport(layout.pos.row = row, layout.pos.col = col)
+}
+# Arranger les graphiques
+print(Model_T1, vp=define_region(1, 1))
+print(Model_T2, vp = define_region(1, 2))
+print(Yield_gains, vp = define_region(2, 1:2))
+
+```
+
+\newpage
+# Results
+The model 'r paramT1 ' give the yield maP in the whole area as 'r params$T1 ' was the only treatment applied  in the entire field and model 'r paramT2 ' showshow the yield map if 'r params$T2 ' was used in the entire a rea.
+
+```{r Surface gain yielt histogram, echo=FALSE, include=FALSE}
+
+
+  ## CREATING HISTOGRAM
+
+  Yield_gain_hist=ggplot(data.frame(Kriged_data),aes(x=Kriged_data$Diff.,fill=Class_Diff))+geom_histogram(color="black")+
+                  theme_bw()+
+                  xlab("Yield(tons)")+ylab("Frequency")+ggtitle("Histogram of yield gain using T2")+
+                  scale_fill_manual("Yield (Tons)",
+                                    values=Couleurs_rendement,
+                                    breaks=c("1","2","3","4"),
+                                    labels=Labels_map_diff)
+
+
+  ## Reprendre les mêmes classes que plus haut
+
+
+```
+
+
+
+```{r Yield gain histo, out.width = '150%', echo=FALSE}
+# Plot histogram of yield
+Yield_gain_hist
+```
+
+
+```{r yield frequence histogram, echo=FALSE, include=FALSE}
+# Calculate frequency for each class label
+Freq_table_gains=as.data.frame(round(table(Kriged_data$Class_Diff)/length(Kriged_data$Class_Diff),2))
+colnames(Freq_table_gains)=c("Class","Frequency")
+Freq_table_gains$Class=Labels_map_diff
+
+```
+
+```{r plot histogram, out.width = '150%', echo=FALSE}
+# Plot histogram of yield
+
+```
+
+
+##Comparing model :
+`r ParamT2` modelisation map versus `r ParamT1` modelisation map show a yield gain in `r (1-Freq_table_gains[1,2])*100`% of the field.
+
+```{r ANOVA, echo=FALSE, include=FALSE}
+library(reshape)
+
+## Prepare data for anova
+
+Kriged_data_df=data.frame(Kriged_data)
+Kriged_data_subset=subset(Kriged_data_df,select=c(VRYIELD,VRYIELD_2))
+Kriged_data_reshape=melt(data.frame(Kriged_data_subset),measure.vars=c("VRYIELD","VRYIELD_2"))
+levels(Kriged_data_reshape$variable)=c("T1","T2")
+colnames(Kriged_data_reshape)=c("Treatment","Yield")
+
+## Visualise data
+
+
+Boxplot_Gains=ggplot(Kriged_data_reshape,aes(x=Treatment,y=Yield))+geom_boxplot()+
+              theme_bw()+
+              xlab("Treatment")+ylab("Yield (tonnes/ha)")+ggtitle("Boxplot")
+
+
+## Run one-way anova
+
+Anova_yield <- aov(Yield ~ Treatment, data = Kriged_data_reshape)
+
+
+```
+
+
+```{r plot gain yield, out.width = '150%', echo=FALSE}
+
+ Boxplot_Gains
+
+summary(Anova_yield)
+
+
+```
+
+## ANOVA result
+At 1% of significance showed a high statistical difference between `r ParamT2` and `r ParamT1` and this difference was 0.53 tons/hectare.
+
